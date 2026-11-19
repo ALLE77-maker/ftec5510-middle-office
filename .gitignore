@@ -3,4 +3,11 @@ __pycache__/
 .middle_office/
 .venv/
 .env
+.env.*
+!/.env.example
+.claude/settings.local.json
+CLAUDE.local.md
+.DS_Store
+*.key
+*.pem
 *.sqlite3*

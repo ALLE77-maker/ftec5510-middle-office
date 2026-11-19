@@ -35,6 +35,7 @@ python -B -m unittest discover -s tests -v
 
 ## 分工和接口
 
+- [三人协作指南](docs/COLLABORATION.md)及[共享 AI 规范](CLAUDE.md)
 - [完整接口说明](docs/API.md)
 - [组员协调事项与 AI 重合分析](docs/INTEGRATION.md)
 - [业务规则与演示假设](docs/RULES.md)
@@ -61,6 +62,8 @@ python scripts/check_ai_integration.py --ai-source ../crypto-ai-mvp
 ## 跨机器访问
 
 默认仅监听本机。跨机器运行时设置 `MO_API_TOKEN`（可信业务后端的写入凭证）和另一个不同的 `MO_AI_READ_TOKEN`（AI 只读凭证），再指定内网 IPv4。凭证通过环境变量设置，示例值应替换为组内随机生成的值。
+
+[`.env.example`](.env.example) 列出可用配置。启动时请把所需变量设置到进程环境中。
 
 PowerShell 示例。
 
