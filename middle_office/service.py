@@ -1,6 +1,7 @@
 """Six middle-office modules with a single authoritative simulated ledger."""
 from datetime import datetime, timezone
 from decimal import Decimal
+import hashlib
 import json
 import re
 import uuid
@@ -148,13 +149,13 @@ class MiddleOffice:
             require(account["assessment"] is not None, "assessment_not_found", "assessment has not been supplied", 404)
             return account["assessment"]
 
-    def _fresh(self, quote):
-        age = (self.clock() - timestamp(quote["as_of"])).total_seconds()
+    def _fresh(self, quote, *, at=None):
+        age = ((at or self.clock()) - timestamp(quote["as_of"])).total_seconds()
         return -15 <= age <= self.max_quote_age
 
-    def _quote(self, state, symbol, venue=None):
+    def _quote(self, state, symbol, venue=None, *, at=None):
         candidates = [q for q in state["quotes"].values() if q["symbol"] == symbol
-                      and (venue is None or q["source"] == venue) and self._fresh(q)]
+                      and (venue is None or q["source"] == venue) and self._fresh(q, at=at)]
         require(candidates, "quote_unavailable", "no fresh quote for this pair and source", 409)
         # Valuation uses the newest source, with deterministic source tie breaking.
         return max(candidates, key=lambda q: (q["as_of"], q["source"]))
@@ -409,7 +410,7 @@ class MiddleOffice:
             self._audit(state, user, "order_cancelled", order_id)
             return self._public_order(order)
 
-    def _snapshot(self, state, user):
+    def _snapshot(self, state, user, *, as_of=None):
         account = self._account(state, user)
         assets = {key: D(value) for key, value in account["balances"].items()}
         for symbol, row in account["positions"].items():
@@ -418,17 +419,18 @@ class MiddleOffice:
         orders = [{key: o[key] for key in ("order_id", "symbol", "side", "quantity", "limit_price", "status")}
                   for o in state["orders"].values() if o["user_id"] == user and o["status"] == "open"]
         positions = [{"symbol": key, "quantity": amount(value)} for key, value in sorted(assets.items()) if value != 0]
-        return {"as_of": iso(self.clock()), "positions": positions[:50], "open_orders": orders[:50],
+        return {"as_of": iso(as_of or self.clock()), "positions": positions[:50], "open_orders": orders[:50],
                 "truncated": len(positions) > 50 or len(orders) > 50}
 
     def snapshot(self, user):
         with self.store.transaction() as state:
             return self._snapshot(state, user)
 
-    def _portfolio(self, state, user):
+    def _portfolio(self, state, user, *, as_of=None):
+        as_of = as_of or self.clock()
         account = self._account(state, user)
         currency = account["valuation_currency"]
-        rows, reasons = [], []
+        rows, reasons, quotes = [], [], {}
         total, unrealized, realized = D(0), D(0), D(0)
         for symbol, holding in account["positions"].items():
             qty, cost = D(holding["quantity"]), D(holding["cost"])
@@ -438,15 +440,19 @@ class MiddleOffice:
             else:
                 reasons.append("mixed_cost_currency")
             try:
-                quote = self._quote(state, symbol) if qty else None
+                quote = self._quote(state, symbol, at=as_of) if qty else None
+                if quote:
+                    quotes[symbol] = quote.copy()
                 value = qty * D(quote["price"]) if quote else D(0)
                 row.update(state="valued", market_value=amount(value), unrealized_pnl=amount(value - cost),
+                           market_price=quote["price"] if quote else None,
                            as_of=quote["as_of"] if quote else None, source=quote["source"] if quote else None)
                 if symbol.split('/')[1] == currency:
                     total += value
                     unrealized += value - cost
             except BusinessError:
-                row.update(state="unvalued", market_value=None, unrealized_pnl=None)
+                row.update(state="unvalued", market_value=None, unrealized_pnl=None,
+                           market_price=None, as_of=None, source=None)
                 reasons.append("missing_or_stale_quote")
             rows.append(row)
         for cash_currency, value in account["balances"].items():
@@ -456,7 +462,10 @@ class MiddleOffice:
                 total += D(value)
             else:
                 try:
-                    total += D(value) * D(self._quote(state, f"{cash_currency}/{currency}")["price"])
+                    symbol = f"{cash_currency}/{currency}"
+                    quote = self._quote(state, symbol, at=as_of)
+                    quotes[symbol] = quote.copy()
+                    total += D(value) * D(quote["price"])
                 except BusinessError:
                     reasons.append("unvalued_cash")
         balances = [{"currency": code, "total": value,
@@ -469,15 +478,58 @@ class MiddleOffice:
             if trade["user_id"] == user:
                 code = trade["symbol"].split('/')[1]
                 fees[code] = amount(D(fees.get(code, "0")) + D(trade["fee"]))
-        return {"user_id": user, "as_of": iso(self.clock()), "valuation_currency": currency,
+        return {"user_id": user, "as_of": iso(as_of), "valuation_currency": currency,
                 "state": "partial" if reasons else "ok", "reasons": sorted(set(reasons)),
                 "total_assets": None if reasons else amount(total), "observed_assets": amount(total),
                 "unrealized_pnl": None if reasons else amount(unrealized), "realized_pnl": amount(realized),
-                "fees_by_currency": fees, "balances": balances, "positions": rows}
+                "fees_by_currency": fees, "balances": balances, "positions": rows,
+                "valuation_quotes": [quotes[key] for key in sorted(quotes)]}
 
     def portfolio(self, user):
         with self.store.transaction() as state:
             return self._portfolio(state, user)
+
+    def _position_risk_values(self, portfolio):
+        """Use the same unrounded ratios for monitoring and the AI report."""
+        if portfolio["state"] != "ok" or D(portfolio["total_assets"]) <= 0:
+            return
+        total = D(portfolio["total_assets"])
+        for row in portfolio["positions"]:
+            concentration = D(row["market_value"]) / total * 100
+            cost = D(row["cost"])
+            loss = -D(row["unrealized_pnl"]) / cost * 100 if cost else D(0)
+            yield row["symbol"], "concentration_pct", concentration
+            yield row["symbol"], "loss_pct", loss
+
+    def analysis_snapshot(self, user):
+        """Read ledger, valuation quotes and official numbers in ONE transaction.
+
+        Consumers must reuse this response when comparing numbers; a second
+        HTTP request can legitimately observe a later ledger or quote version.
+        """
+        with self.store.transaction() as state:
+            as_of = self.clock()
+            account = self._account(state, user)
+            snapshot = self._snapshot(state, user, as_of=as_of)
+            portfolio = self._portfolio(state, user, as_of=as_of)
+            metrics = []
+            for symbol, rule, value in self._position_risk_values(portfolio):
+                threshold = D(account["limits"][rule])
+                metrics.append({"symbol": symbol, "rule": rule, "value": amount(value),
+                                "threshold": amount(threshold), "breached": value >= threshold})
+            reasons = portfolio["reasons"] + (["account_truncated"] if snapshot["truncated"] else [])
+            report = {"schema_version": 1, "user_id": user, "as_of": iso(as_of),
+                      "state": "partial" if reasons else "ok", "reasons": reasons,
+                      "account": snapshot, "portfolio": portfolio,
+                      "risk": {"state": portfolio["state"], "position_metrics": metrics},
+                      "basis": {"ledger": "middle_office", "valuation": "newest_fresh_quote_per_pair",
+                                "quote_max_age_seconds": self.max_quote_age,
+                                "concentration_denominator": "total_assets_including_cash",
+                                "loss_formula": "-unrealized_pnl/cost*100",
+                                "decimal_places": 8, "rounding": "ROUND_HALF_EVEN"}}
+            encoded = json.dumps(report, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+            report["snapshot_id"] = "ana_" + hashlib.sha256(encoded).hexdigest()
+            return report
 
     def _alert(self, state, user, category, key, evidence):
         existing = next((a for a in state["alerts"].values() if a["user_id"] == user and a["key"] == key
@@ -494,20 +546,13 @@ class MiddleOffice:
         portfolio = self._portfolio(state, user)
         account = state["accounts"][user]
         active_keys = set()
-        if portfolio["state"] == "ok" and D(portfolio["total_assets"]) > 0:
-            total = D(portfolio["total_assets"])
-            for row in portfolio["positions"]:
-                symbol = row["symbol"]
-                concentration = D(row["market_value"]) / total * 100
-                cost = D(row["cost"])
-                loss_pct = -D(row["unrealized_pnl"]) / cost * 100 if cost else D(0)
-                for name, value in (("concentration_pct", concentration), ("loss_pct", loss_pct)):
-                    threshold = D(account["limits"][name])
-                    if value >= threshold:
-                        key = name + ":" + symbol
-                        active_keys.add(key)
-                        self._alert(state, user, "position_risk", key,
-                                    {"rule": name, "symbol": symbol, "value": amount(value), "threshold": amount(threshold)})
+        for symbol, name, value in self._position_risk_values(portfolio):
+            threshold = D(account["limits"][name])
+            if value >= threshold:
+                key = name + ":" + symbol
+                active_keys.add(key)
+                self._alert(state, user, "position_risk", key,
+                            {"rule": name, "symbol": symbol, "value": amount(value), "threshold": amount(threshold)})
         for index, rule in enumerate(account["preferences"]["price_alerts"]):
             try:
                 quote = self._quote(state, rule["symbol"])

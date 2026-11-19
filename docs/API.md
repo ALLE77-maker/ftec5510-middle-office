@@ -2,7 +2,7 @@
 
 默认服务前缀 `http://127.0.0.1:8200`。输入和输出均为 JSON。金额、价格、数量输出为十进制字符串，时间为 UTC RFC 3339。非 GET 请求使用 `Content-Type: application/json`，最大请求体 256 KiB。
 
-配置 `MO_API_TOKEN` 后，操作请求携带 `Authorization: Bearer <MO_API_TOKEN>`。AI 使用不同的 `MO_AI_READ_TOKEN`，只允许查询报价和账户快照。业务后端负责根据登录会话映射 `user_id`，格式为 1–64 个 ASCII 字母、数字、下划线或连字符。
+配置 `MO_API_TOKEN` 后，操作请求携带 `Authorization: Bearer <MO_API_TOKEN>`。AI 使用不同的 `MO_AI_READ_TOKEN`，只允许查询报价、账户快照和只读估值分析报告。业务后端负责根据登录会话映射 `user_id`，格式为 1–64 个 ASCII 字母、数字、下划线或连字符。
 
 | 方法及路径 | 作用 |
 | --- | --- |
@@ -17,6 +17,7 @@
 | POST / GET `/api/accounts/{user_id}/orders` | 提交或查询订单，GET 可用 `?status=open` |
 | POST `/api/accounts/{user_id}/orders/{order_id}/cancel` | 撤销未成交订单，发送 `{}` |
 | GET `/api/accounts/{user_id}/snapshot` | AI 兼容的持仓及挂单快照 |
+| GET `/api/accounts/{user_id}/analysis_snapshot` | 同次读取账户、官方估值、风险指标及实际报价依据，含快照编号 |
 | GET `/api/accounts/{user_id}/portfolio` | 成本、市值、盈亏、资金预留和累计费用 |
 | GET `/api/accounts/{user_id}/trades?offset=0&limit=100` | 成交流水，limit 最大 500 |
 | GET `/api/accounts/{user_id}/alerts` | 查询价格、持仓风险及 AML 告警，同时重新检查当前风险 |
@@ -121,6 +122,12 @@
 `positions` 为资产总数量，包含已被挂单预留的数量。持仓和现金按资产合并，避免重复计数。AI 快照最多各 50 行，超过时 `truncated: true`。已确认空账户返回两个空数组，未知账户返回 404。
 
 完整的 `portfolio` 提供 `balances.total/reserved/available` 及持仓成本和盈亏。报价缺失或过期时返回 `state: partial`，对应估值和完整账户总资产为 null，保留缺失原因。GET 快照的 `as_of` 是读取账本时刻，估值价格的时间保留在 portfolio 各持仓中。
+
+## AI 与前端共享数字
+
+`GET /api/accounts/{user_id}/analysis_snapshot` 在一次读取事务及同一个估值时刻生成 `account`、`portfolio`、`risk`、`basis` 和 `snapshot_id`。`portfolio.valuation_quotes` 保留实际使用的报价，持仓行新增 `market_price` 字段。AI 只读凭证可以读取此报告，但仍不能单独读取 `/portfolio` 或内部告警。
+
+两端需共享同一份返回内容及快照编号，并直接使用 `portfolio` 的官方数值；两端分别请求最新报告不保证版本相同。原 `/snapshot` 格式不变，他现有的读取代码不会自动采用新接口。详见 [一致性说明与 Python 代码](AI_NUMBER_CONSISTENCY.md)。
 
 ## 告警与人工复核
 

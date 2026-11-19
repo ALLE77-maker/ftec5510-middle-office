@@ -1,6 +1,6 @@
 """Shared wire-format validation. Money is stored as decimal strings."""
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation, localcontext
+from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 import re
 
 
@@ -41,7 +41,7 @@ def number(value, field, *, positive=False, maximum="1000000000000"):
 def amount(value):
     with localcontext() as context:
         context.prec = 60
-        value = value.quantize(Decimal("0.00000001"))
+        value = value.quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
     return format(value, "f").rstrip("0").rstrip(".") if value else "0"
 
 

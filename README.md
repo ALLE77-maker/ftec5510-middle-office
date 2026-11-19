@@ -38,6 +38,8 @@ python -B -m unittest discover -s tests -v
 - [完整接口说明](docs/API.md)
 - [组员协调事项与 AI 重合分析](docs/INTEGRATION.md)
 - [业务规则与演示假设](docs/RULES.md)
+- [对接杨昊岳：持仓与挂单](对接杨昊岳.md)
+- [中台记账、风控及 AI 数字一致性的 Python 代码](docs/AI_NUMBER_CONSISTENCY.md)
 
 这次实现采用独立 HTTP 中控服务，便于 C++/Qt、网页和 AI 服务分别调用。原 `dev.zip` 的 C++ 项目作为上游接入对象。`examples/qt/MiddleOfficeClient.h` 提供异步 Qt 网络调用示例，组员将其接入 BusinessEngine。该示例尚未在 Qt 编译环境验证。
 
@@ -46,6 +48,7 @@ python -B -m unittest discover -s tests -v
 已对照并联调杨昊岳的 [crypto-ai-mvp](https://github.com/phillipyang62/crypto-ai-mvp)，基准提交为 `bcfd2220e3c3ab1f47deb983fb3869fa692542f3`。
 
 - `GET /api/quotes?q=BTC%2FUSDT&limit=5` 返回币种、价格、计价交易对、来源及时间。
+- `GET /api/accounts/{user_id}/analysis_snapshot` 返回同一次读取的账户、官方估值、风险指标和报价依据。AI 侧示例见 `examples/ai/consistent_analysis.py`；需要他另行接入新路径，详见一致性说明。
 - `GET /api/accounts/{user_id}/snapshot` 返回持仓和未完成订单。
 - 问卷使用相同 `user_id` 和派生 `assessment` 字段，可由问卷或业务后端分别提交到两端。
 

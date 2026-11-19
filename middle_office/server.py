@@ -67,9 +67,9 @@ class Handler(BaseHTTPRequestHandler):
         offered = self.headers.get("Authorization", "").encode()
         if self.server.token and hmac.compare_digest(offered, ("Bearer " + self.server.token).encode()):
             return
-        read_path = path == "/api/quotes" or re.fullmatch(r"/api/accounts/[A-Za-z0-9_-]{1,64}/snapshot", path)
+        read_path = path == "/api/quotes" or re.fullmatch(r"/api/accounts/[A-Za-z0-9_-]{1,64}/(?:snapshot|analysis_snapshot)", path)
         if self.server.read_token and hmac.compare_digest(offered, ("Bearer " + self.server.read_token).encode()):
-            require(self.command == "GET" and read_path, "read_only", "AI token only grants quotes and account snapshots", 403)
+            require(self.command == "GET" and read_path, "read_only", "AI token only grants quotes and read-only account reports", 403)
             return
         require(not self.server.token, "unauthorized", "valid service bearer token required", 401)
 
@@ -95,7 +95,7 @@ class Handler(BaseHTTPRequestHandler):
             user, action = match.groups()
             if action is None and method == "POST":
                 return 201, office.create_account(user, self._body())
-            if method == "GET" and action in {"snapshot", "portfolio", "preferences", "assessment", "alerts"}:
+            if method == "GET" and action in {"snapshot", "analysis_snapshot", "portfolio", "preferences", "assessment", "alerts"}:
                 return 200, getattr(office, action)(user)
             if method == "PUT" and action in {"preferences", "assessment"}:
                 return 200, getattr(office, action)(user, self._body())
